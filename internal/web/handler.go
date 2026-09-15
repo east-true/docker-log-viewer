@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/east-true/docker-log-viewer/internal/dockerengine"
+	"github.com/east-true/docker-log-viewer/internal/transport"
 )
 
 //go:embed assets/*
@@ -23,9 +24,10 @@ var embeddedAssets embed.FS
 var containerIDPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type Backend interface {
-	Containers(context.Context) ([]dockerengine.Container, error)
-	Images(context.Context) ([]dockerengine.Image, error)
-	Logs(context.Context, dockerengine.LogRequest, func(dockerengine.LogEvent) error) error
+	Agents(context.Context) ([]transport.Agent, error)
+	Containers(context.Context, string) ([]dockerengine.Container, error)
+	Images(context.Context, string) ([]dockerengine.Image, error)
+	Logs(context.Context, string, dockerengine.LogRequest, func(dockerengine.LogEvent) error) error
 }
 
 type Handler struct {
@@ -74,23 +76,34 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/health":
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	case "/api/containers":
+	case "/api/agents":
 		if r.URL.RawQuery != "" {
-			writeProblem(w, http.StatusBadRequest, "INVALID_QUERY", "container inventory does not accept query parameters")
+			writeProblem(w, http.StatusBadRequest, "INVALID_QUERY", "Agent inventory does not accept query parameters")
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
-		value, err := h.backend.Containers(ctx)
+		value, err := h.backend.Agents(ctx)
+		h.respond(w, value, err)
+	case "/api/containers":
+		agentID, err := decodeAgentQuery(r)
+		if err != nil {
+			writeProblem(w, http.StatusBadRequest, "INVALID_QUERY", err.Error())
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		value, err := h.backend.Containers(ctx, agentID)
 		h.respond(w, value, err)
 	case "/api/images":
-		if r.URL.RawQuery != "" {
-			writeProblem(w, http.StatusBadRequest, "INVALID_QUERY", "image inventory does not accept query parameters")
+		agentID, err := decodeAgentQuery(r)
+		if err != nil {
+			writeProblem(w, http.StatusBadRequest, "INVALID_QUERY", err.Error())
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
-		value, err := h.backend.Images(ctx)
+		value, err := h.backend.Images(ctx, agentID)
 		h.respond(w, value, err)
 	case "/api/logs":
 		h.serveLogs(w, r)
@@ -100,13 +113,13 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
-	request, target, err := decodeLogRequest(r)
+	request, agentID, target, err := decodeLogRequest(r)
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "INVALID_QUERY", err.Error())
 		return
 	}
 	ctx := r.Context()
-	containers, err := h.backend.Containers(ctx)
+	containers, err := h.backend.Containers(ctx, agentID)
 	if err != nil {
 		h.respond(w, nil, err)
 		return
@@ -138,7 +151,7 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = emit(dockerengine.LogEvent{Type: "ready", Message: "1", ObservedAt: time.Now().UTC()})
 	request.ContainerID = selected.ID
-	if streamErr := h.backend.Logs(ctx, request, emit); streamErr != nil && ctx.Err() == nil {
+	if streamErr := h.backend.Logs(ctx, agentID, request, emit); streamErr != nil && ctx.Err() == nil {
 		_ = emit(dockerengine.LogEvent{
 			Type: "error", ContainerID: selected.ID, ContainerName: selected.Name,
 			Message: streamErr.Error(), ObservedAt: time.Now().UTC(),
@@ -149,24 +162,28 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func decodeLogRequest(r *http.Request) (dockerengine.LogRequest, string, error) {
+func decodeLogRequest(r *http.Request) (dockerengine.LogRequest, string, string, error) {
 	query := r.URL.Query()
 	for key := range query {
 		switch key {
-		case "container", "tail", "since", "follow":
+		case "agent", "container", "tail", "since", "follow":
 		default:
-			return dockerengine.LogRequest{}, "", fmt.Errorf("unsupported query parameter %q", key)
+			return dockerengine.LogRequest{}, "", "", fmt.Errorf("unsupported query parameter %q", key)
 		}
 		if len(query[key]) != 1 {
-			return dockerengine.LogRequest{}, "", fmt.Errorf("query parameter %q must appear once", key)
+			return dockerengine.LogRequest{}, "", "", fmt.Errorf("query parameter %q must appear once", key)
 		}
+	}
+	agentID := query.Get("agent")
+	if !agentIDPattern.MatchString(agentID) {
+		return dockerengine.LogRequest{}, "", "", errors.New("agent must be a valid UUID")
 	}
 	target := query.Get("container")
 	if target == "" {
-		return dockerengine.LogRequest{}, "", errors.New("container is required")
+		return dockerengine.LogRequest{}, "", "", errors.New("container is required")
 	}
 	if !containerIDPattern.MatchString(target) {
-		return dockerengine.LogRequest{}, "", errors.New("container must be a full 64-character ID")
+		return dockerengine.LogRequest{}, "", "", errors.New("container must be a full 64-character ID")
 	}
 	tail := query.Get("tail")
 	if tail == "" {
@@ -175,17 +192,17 @@ func decodeLogRequest(r *http.Request) (dockerengine.LogRequest, string, error) 
 	if tail != "all" {
 		lines, err := strconv.Atoi(tail)
 		if err != nil || lines < 1 || lines > 10_000 {
-			return dockerengine.LogRequest{}, "", errors.New("tail must be 'all' or a number from 1 to 10000")
+			return dockerengine.LogRequest{}, "", "", errors.New("tail must be 'all' or a number from 1 to 10000")
 		}
 	}
 	since := query.Get("since")
 	allowedSince := map[string]bool{"": true, "5m": true, "15m": true, "1h": true, "6h": true, "24h": true, "7d": true}
 	if !allowedSince[since] {
 		if len(since) > 64 {
-			return dockerengine.LogRequest{}, "", errors.New("since timestamp is too long")
+			return dockerengine.LogRequest{}, "", "", errors.New("since timestamp is too long")
 		}
 		if _, err := time.Parse(time.RFC3339Nano, since); err != nil {
-			return dockerengine.LogRequest{}, "", errors.New("since must be a supported duration or RFC3339 timestamp")
+			return dockerengine.LogRequest{}, "", "", errors.New("since must be a supported duration or RFC3339 timestamp")
 		}
 	}
 	follow := true
@@ -193,15 +210,25 @@ func decodeLogRequest(r *http.Request) (dockerengine.LogRequest, string, error) 
 		var err error
 		follow, err = strconv.ParseBool(raw)
 		if err != nil {
-			return dockerengine.LogRequest{}, "", errors.New("follow must be true or false")
+			return dockerengine.LogRequest{}, "", "", errors.New("follow must be true or false")
 		}
 	}
-	return dockerengine.LogRequest{Tail: tail, Since: since, Follow: follow}, target, nil
+	return dockerengine.LogRequest{Tail: tail, Since: since, Follow: follow}, agentID, target, nil
+}
+
+var agentIDPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
+
+func decodeAgentQuery(r *http.Request) (string, error) {
+	query := r.URL.Query()
+	if len(query) != 1 || len(query["agent"]) != 1 || !agentIDPattern.MatchString(query.Get("agent")) {
+		return "", errors.New("exactly one valid Agent UUID is required")
+	}
+	return query.Get("agent"), nil
 }
 
 func (h *Handler) respond(w http.ResponseWriter, value any, err error) {
 	if err != nil {
-		writeProblem(w, http.StatusServiceUnavailable, "DOCKER_UNAVAILABLE", err.Error())
+		writeProblem(w, http.StatusServiceUnavailable, "AGENT_UNAVAILABLE", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, value)

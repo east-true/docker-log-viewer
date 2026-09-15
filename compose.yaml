@@ -1,13 +1,47 @@
 services:
-  docker-log-viewer:
+  server:
     build: .
     image: docker-log-viewer:local
-    container_name: docker-log-viewer
+    container_name: docker-log-viewer-server
     restart: unless-stopped
     read_only: true
     security_opt:
       - no-new-privileges:true
+    environment:
+      DOCKER_LOG_VIEWER_AGENT_TOKEN: ${DOCKER_LOG_VIEWER_AGENT_TOKEN:?set a random token with at least 32 characters}
+    command:
+      - server
+      - -listen
+      - 0.0.0.0:8080
+      - -agent-listen
+      - 0.0.0.0:9080
+      - -agent-insecure
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${DOCKER_LOG_VIEWER_PORT:-8080}:8080"
+
+  agent:
+    image: docker-log-viewer:local
+    pull_policy: never
+    container_name: docker-log-viewer-agent
+    restart: unless-stopped
+    depends_on:
+      - server
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DOCKER_LOG_VIEWER_AGENT_TOKEN: ${DOCKER_LOG_VIEWER_AGENT_TOKEN:?set a random token with at least 32 characters}
+      DOCKER_LOG_VIEWER_AGENT_NAME: ${DOCKER_LOG_VIEWER_AGENT_NAME:-local-docker}
+    command:
+      - agent
+      - -server
+      - server:9080
+      - -state-dir
+      - /var/lib/docker-log-viewer
+      - -insecure
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - agent-state:/var/lib/docker-log-viewer
+
+volumes:
+  agent-state:

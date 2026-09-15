@@ -1,11 +1,17 @@
 import { LogAssembler } from "./log-buffer.mjs";
 
 const MAX_LOG_RECORDS = 10000;
+const REFRESH_INTERVALS = new Set([0, 5, 10, 30, 60]);
+const REFRESH_STORAGE_KEY = "docker-log-viewer-refresh-seconds";
 
 const state = {
+  agents: [],
   containers: [],
   images: [],
   selected: null,
+  inventoryToken: 0,
+  collapsedAgents: new Set(),
+  failedAgents: new Set(),
   logs: [],
   assembler: new LogAssembler(),
   liveEnabled: true,
@@ -13,6 +19,7 @@ const state = {
   controller: null,
   reconnectTimer: null,
   inventoryTimer: null,
+  refreshSeconds: 5,
   streamInitialized: false,
   currentView: null,
   streamToken: 0,
@@ -28,7 +35,9 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
 async function fetchJSON(path) {
-  const response = await fetch(path, { headers: { Accept: "application/json" } });
+  const response = await fetch(path, {
+    headers: { Accept: "application/json" },
+  });
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {
@@ -54,29 +63,148 @@ function setEngineStatus(ok, message) {
   root.querySelector("small").textContent = message;
 }
 
-async function loadInventory({ quiet = false } = {}) {
+function storedRefreshSeconds() {
   try {
-    const [containers, images] = await Promise.all([fetchJSON("/api/containers"), fetchJSON("/api/images")]);
-    const previousTarget = state.containers.find((item) => item.id === state.selected);
+    const stored = localStorage.getItem(REFRESH_STORAGE_KEY);
+    if (stored === null) return 5;
+    const seconds = Number(stored);
+    return REFRESH_INTERVALS.has(seconds) ? seconds : 5;
+  } catch (_) {
+    return 5;
+  }
+}
+
+function setRefreshInterval(seconds) {
+  state.refreshSeconds = REFRESH_INTERVALS.has(seconds) ? seconds : 5;
+  clearInterval(state.inventoryTimer);
+  state.inventoryTimer = null;
+  $$(".refresh-interval").forEach((select) => {
+    select.value = String(state.refreshSeconds);
+  });
+  try {
+    localStorage.setItem(REFRESH_STORAGE_KEY, String(state.refreshSeconds));
+  } catch (_) {}
+  if (state.refreshSeconds > 0) {
+    state.inventoryTimer = setInterval(
+      () => loadInventory({ quiet: true }),
+      state.refreshSeconds * 1000,
+    );
+  }
+}
+
+async function loadInventory({ quiet = false } = {}) {
+  const inventoryToken = ++state.inventoryToken;
+  try {
+    const agents = await fetchJSON("/api/agents");
+    if (inventoryToken !== state.inventoryToken) return;
+    state.agents = agents;
+    const connectedAgents = agents.filter((item) => item.connected);
+    if (!connectedAgents.length) {
+      stopLogStream({ flush: true });
+      state.failedAgents = new Set();
+      state.containers = [];
+      state.images = [];
+      state.selected = null;
+      renderContainers();
+      renderImages();
+      renderTarget();
+      setEngineStatus(
+        false,
+        agents.length ? "모든 Agent 오프라인" : "Agent 연결 대기",
+      );
+      return;
+    }
+    const inventories = await Promise.all(
+      connectedAgents.map(async (agent) => {
+        const query = new URLSearchParams({ agent: agent.id });
+        try {
+          const [containers, images] = await Promise.all([
+            fetchJSON(`/api/containers?${query}`),
+            fetchJSON(`/api/images?${query}`),
+          ]);
+          return { agent, containers, images };
+        } catch (error) {
+          return { agent, containers: [], images: [], error };
+        }
+      }),
+    );
+    if (inventoryToken !== state.inventoryToken) return;
+    const containers = inventories.flatMap(({ agent, containers: values }) =>
+      values.map((item) => ({
+        ...item,
+        agent_id: agent.id,
+        agent_name: agent.name,
+      })),
+    );
+    const images = inventories.flatMap(({ agent, images: values }) =>
+      values.map((item) => ({
+        ...item,
+        agent_id: agent.id,
+        agent_name: agent.name,
+      })),
+    );
+    const previousTarget = selectedContainer();
     const previousSelection = state.selected;
     state.containers = containers;
     state.images = images;
-    if (!state.selected || !containers.some((item) => item.id === state.selected)) {
-      state.selected = containers[0]?.id || null;
+    if (
+      !state.selected ||
+      !containers.some((item) => containerKey(item) === state.selected)
+    ) {
+      state.selected = containers[0] ? containerKey(containers[0]) : null;
     }
-    const currentTarget = containers.find((item) => item.id === state.selected);
+    const currentTarget = selectedContainer();
     const selectionChanged = previousSelection !== state.selected;
-    const runtimeChanged = previousTarget && currentTarget && previousTarget.state !== currentTarget.state;
-    if (state.currentView === "logs" && state.streamInitialized && selectionChanged) restartLogStream();
-    else if (state.currentView === "logs" && state.streamInitialized && runtimeChanged) streamLogs({ resume: true });
+    const runtimeChanged =
+      previousTarget &&
+      currentTarget &&
+      previousTarget.state !== currentTarget.state;
+    if (
+      state.currentView === "logs" &&
+      state.streamInitialized &&
+      selectionChanged
+    )
+      restartLogStream();
+    else if (
+      state.currentView === "logs" &&
+      state.streamInitialized &&
+      runtimeChanged
+    )
+      streamLogs({ resume: true });
+    const failures = inventories.filter((item) => item.error);
+    state.failedAgents = new Set(failures.map((item) => item.agent.id));
     renderContainers();
     renderImages();
     renderTarget();
-    setEngineStatus(true, `${containers.length} containers`);
+    setEngineStatus(
+      failures.length === 0,
+      `${connectedAgents.length} agents · ${containers.length} containers`,
+    );
+    if (failures.length && !quiet)
+      showToast(
+        `${failures.length}개 Agent의 inventory를 불러오지 못했습니다.`,
+      );
   } catch (error) {
-    setEngineStatus(false, "연결할 수 없음");
-    if (!quiet) showToast(`Docker Engine: ${error.message}`);
+    stopLogStream({ flush: true });
+    state.agents = [];
+    state.containers = [];
+    state.images = [];
+    state.selected = null;
+    state.failedAgents = new Set();
+    renderContainers();
+    renderImages();
+    renderTarget();
+    setEngineStatus(false, "Agent에 연결할 수 없음");
+    if (!quiet) showToast(`Docker Agent: ${error.message}`);
   }
+}
+
+function containerKey(item) {
+  return `${item.agent_id}:${item.id}`;
+}
+
+function selectedContainer() {
+  return state.containers.find((item) => containerKey(item) === state.selected);
 }
 
 function renderContainers() {
@@ -85,39 +213,98 @@ function renderContainers() {
   root.replaceChildren();
   $("#container-count").textContent = state.containers.length;
 
-  const filtered = state.containers.filter((item) => {
-    const text = `${item.name} ${item.image} ${item.short_id} ${item.state}`.toLowerCase();
-    return text.includes(query);
+  const agents = state.agents.filter((agent) => {
+    if (!query) return true;
+    if (agent.name.toLowerCase().includes(query)) return true;
+    return state.containers.some(
+      (item) => item.agent_id === agent.id && containerMatches(item, query),
+    );
   });
-  for (const item of filtered) {
-    const button = document.createElement("button");
-    button.className = `container-item${state.selected === item.id ? " selected" : ""}`;
-    button.dataset.id = item.id;
-    button.setAttribute("role", "option");
-    button.setAttribute("aria-selected", state.selected === item.id);
-    const dot = document.createElement("span");
-    dot.className = `status-dot ${item.state === "running" ? "running" : "stopped"}`;
-    const text = document.createElement("span");
-    const name = document.createElement("strong");
-    name.textContent = item.name;
-    const meta = document.createElement("small");
-    meta.textContent = item.image;
-    text.append(name, meta);
-    const id = document.createElement("em");
-    id.textContent = item.short_id;
-    button.append(dot, text, id);
-    root.append(button);
+  for (const agent of agents) {
+    const hostMatches = Boolean(
+      query && agent.name.toLowerCase().includes(query),
+    );
+    const items = state.containers.filter(
+      (item) =>
+        item.agent_id === agent.id &&
+        (hostMatches || containerMatches(item, query)),
+    );
+    const group = document.createElement("details");
+    const failed = state.failedAgents.has(agent.id);
+    group.className = `agent-group${agent.connected ? "" : " offline"}${failed ? " unavailable" : ""}`;
+    group.dataset.agentId = agent.id;
+    group.open = query ? true : !state.collapsedAgents.has(agent.id);
+    group.addEventListener("toggle", () => {
+      if (group.open) state.collapsedAgents.delete(agent.id);
+      else state.collapsedAgents.add(agent.id);
+    });
+    const summary = document.createElement("summary");
+    const hostDot = document.createElement("span");
+    hostDot.className = `status-dot ${agent.connected ? "running" : "stopped"}`;
+    const hostName = document.createElement("strong");
+    hostName.textContent = agent.name;
+    const hostCount = document.createElement("span");
+    hostCount.className = "host-count";
+    hostCount.textContent = failed
+      ? "error"
+      : agent.connected
+        ? String(items.length)
+        : "offline";
+    summary.append(hostDot, hostName, hostCount);
+    const body = document.createElement("div");
+    body.className = "agent-containers";
+    for (const item of items) body.append(createContainerButton(item));
+    if (!items.length) {
+      const empty = document.createElement("p");
+      empty.className = "agent-empty";
+      empty.textContent = failed
+        ? "Inventory 조회 실패"
+        : agent.connected
+          ? "컨테이너 없음"
+          : "Agent 오프라인";
+      body.append(empty);
+    }
+    group.append(summary, body);
+    root.append(group);
   }
   if (!root.children.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
-    empty.textContent = "검색 결과가 없습니다.";
+    empty.textContent = state.agents.length
+      ? "검색 결과가 없습니다."
+      : "연결된 Agent가 없습니다.";
     root.append(empty);
   }
 }
 
+function containerMatches(item, query) {
+  const text =
+    `${item.agent_name} ${item.name} ${item.image} ${item.short_id} ${item.state}`.toLowerCase();
+  return text.includes(query);
+}
+
+function createContainerButton(item) {
+  const button = document.createElement("button");
+  const key = containerKey(item);
+  button.className = `container-item${state.selected === key ? " selected" : ""}`;
+  button.dataset.key = key;
+  button.setAttribute("aria-pressed", state.selected === key);
+  const dot = document.createElement("span");
+  dot.className = `status-dot ${item.state === "running" ? "running" : "stopped"}`;
+  const text = document.createElement("span");
+  const name = document.createElement("strong");
+  name.textContent = item.name;
+  const meta = document.createElement("small");
+  meta.textContent = item.image;
+  text.append(name, meta);
+  const id = document.createElement("em");
+  id.textContent = item.short_id;
+  button.append(dot, text, id);
+  return button;
+}
+
 function renderTarget() {
-  const target = state.containers.find((item) => item.id === state.selected);
+  const target = selectedContainer();
   const name = $("#target-name");
   const meta = $("#target-meta");
   const dot = $("#target-dot");
@@ -129,7 +316,7 @@ function renderTarget() {
     return;
   }
   name.textContent = target.name;
-  meta.textContent = `${target.image} · ${target.status}`;
+  meta.textContent = `${target.agent_name} · ${target.image} · ${target.status}`;
   dot.className = `status-dot ${target.state === "running" ? "running" : "stopped"}`;
   renderLiveButton();
 }
@@ -152,17 +339,29 @@ function formatAge(timestamp) {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}분 전`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}시간 전`;
   if (seconds < 86400 * 30) return `${Math.floor(seconds / 86400)}일 전`;
-  return new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "short", day: "numeric" }).format(new Date(timestamp * 1000));
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(timestamp * 1000));
 }
 
 function renderImages() {
   const root = $("#image-table-body");
   const query = $("#image-search").value.trim().toLowerCase();
-  const images = state.images.filter((item) => `${item.tags.join(" ")} ${item.short_id}`.toLowerCase().includes(query));
+  const images = state.images.filter((item) =>
+    `${item.agent_name} ${item.tags.join(" ")} ${item.short_id}`
+      .toLowerCase()
+      .includes(query),
+  );
   root.replaceChildren();
   $("#images-total").textContent = state.images.length;
-  $("#images-used").textContent = state.images.filter((item) => item.in_use).length;
-  $("#images-running").textContent = state.images.filter((item) => item.running_count > 0).length;
+  $("#images-used").textContent = state.images.filter(
+    (item) => item.in_use,
+  ).length;
+  $("#images-running").textContent = state.images.filter(
+    (item) => item.running_count > 0,
+  ).length;
   for (const item of images) {
     const row = document.createElement("tr");
     const imageCell = document.createElement("td");
@@ -177,9 +376,16 @@ function renderImages() {
       more.textContent = `외 ${item.tags.length - 1}개 태그`;
       imageCell.append(more);
     }
-    const idCell = document.createElement("td");
-    idCell.className = "mono";
-    idCell.textContent = item.short_id;
+    const hostCell = document.createElement("td");
+    const host = document.createElement("span");
+    host.className = "host-cell";
+    const hostDot = document.createElement("span");
+    hostDot.className = "status-dot running";
+    const hostName = document.createElement("span");
+    hostName.textContent = item.agent_name;
+    host.title = `Agent ${item.agent_id}`;
+    host.append(hostDot, hostName);
+    hostCell.append(host);
     const sizeCell = document.createElement("td");
     sizeCell.className = "mono";
     sizeCell.textContent = formatBytes(item.size);
@@ -207,7 +413,7 @@ function renderImages() {
       }
     }
     usageCell.append(usage);
-    row.append(imageCell, idCell, sizeCell, ageCell, usageCell);
+    row.append(imageCell, hostCell, sizeCell, ageCell, usageCell);
     root.append(row);
   }
   if (!images.length) {
@@ -215,7 +421,9 @@ function renderImages() {
     const cell = document.createElement("td");
     cell.colSpan = 5;
     cell.className = "empty-state";
-    cell.textContent = state.images.length ? "검색 결과가 없습니다." : "로컬 이미지가 없습니다.";
+    cell.textContent = state.images.length
+      ? "검색 결과가 없습니다."
+      : "연결된 Agent에 이미지가 없습니다.";
     row.append(cell);
     root.append(row);
   }
@@ -228,27 +436,40 @@ function formatLogTimestamp(date) {
 
 function appendEvent(event) {
   if (event.type === "ready") {
-    setStreamState(state.following ? "live" : "", state.following ? "실시간 ON" : "로그 불러오는 중");
+    setStreamState(
+      state.following ? "live" : "",
+      state.following ? "실시간 ON" : "로그 불러오는 중",
+    );
     return;
   }
   if (event.type === "error") {
     flushPendingLogs();
     state.streamHadError = true;
     state.following = false;
-    appendLine({ time: event.observed_at, container: event.container_name || "system", stream: "error", message: event.message, system: true });
+    appendLine({
+      time: event.observed_at,
+      container: event.container_name || "system",
+      stream: "error",
+      message: event.message,
+      system: true,
+    });
     setStreamState("error", "로그를 읽을 수 없음");
     return;
   }
   if (event.type === "end") {
     flushPendingLogs();
     if (state.streamHadError) return;
-    const running = state.containers.find((item) => item.id === state.selected)?.state === "running";
-    setStreamState("", running && !state.liveEnabled ? "실시간 OFF" : "과거 로그");
+    const running = selectedContainer()?.state === "running";
+    setStreamState(
+      "",
+      running && !state.liveEnabled ? "실시간 OFF" : "과거 로그",
+    );
     return;
   }
   if (event.type !== "log") return;
   state.reconnectAttempt = 0;
-  for (const record of state.assembler.push(event)) appendAssembledRecord(record);
+  for (const record of state.assembler.push(event))
+    appendAssembledRecord(record);
 }
 
 function appendAssembledRecord(record) {
@@ -280,7 +501,10 @@ function prepareReplayGuard() {
     state.replayGuard = null;
     return;
   }
-  state.replayGuard = { timestamp: state.lastTimestamp, counts: new Map(state.boundaryCounts) };
+  state.replayGuard = {
+    timestamp: state.lastTimestamp,
+    counts: new Map(state.boundaryCounts),
+  };
 }
 
 function isReplayDuplicate(record) {
@@ -303,16 +527,23 @@ function replayKey(record) {
 }
 
 function appendLine(record) {
-  if (!(typeof record.time === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/.test(record.time))) {
+  if (
+    !(
+      typeof record.time === "string" &&
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/.test(record.time)
+    )
+  ) {
     record.time = formatLogTimestamp(new Date(record.time));
   }
   state.logs.push(record);
   if (state.logs.length > MAX_LOG_RECORDS) state.logs.shift();
   const row = createLogRow(record);
   const output = $("#log-output");
-  const pinned = output.scrollHeight - output.scrollTop - output.clientHeight < 70;
+  const pinned =
+    output.scrollHeight - output.scrollTop - output.clientHeight < 70;
   output.append(row);
-  while (output.children.length > MAX_LOG_RECORDS) output.firstElementChild.remove();
+  while (output.children.length > MAX_LOG_RECORDS)
+    output.firstElementChild.remove();
   applyLogFilterToRow(row);
   if (pinned) output.scrollTop = output.scrollHeight;
   else state.unseenLogs += 1;
@@ -323,9 +554,13 @@ function appendLine(record) {
 function createLogRow(record) {
   const row = document.createElement("div");
   row.className = `log-row ${record.stream}${record.system ? " system" : ""}`;
-  row.dataset.search = `${record.container} ${record.stream} ${record.message}`.toLowerCase();
+  row.dataset.search =
+    `${record.container} ${record.stream} ${record.message}`.toLowerCase();
   for (const [className, value] of [
-    ["log-time", record.time], ["log-container", record.container], ["log-stream", record.stream], ["log-message", record.message],
+    ["log-time", record.time],
+    ["log-container", record.container],
+    ["log-stream", record.stream],
+    ["log-message", record.message],
   ]) {
     const span = document.createElement("span");
     span.className = className;
@@ -337,7 +572,8 @@ function createLogRow(record) {
 
 function applyLogFilterToRow(row) {
   const query = $("#log-search").value.trim().toLowerCase();
-  const hideStderr = !$("#stderr-toggle").checked && row.classList.contains("stderr");
+  const hideStderr =
+    !$("#stderr-toggle").checked && row.classList.contains("stderr");
   row.hidden = hideStderr || (query && !row.dataset.search.includes(query));
 }
 
@@ -348,13 +584,16 @@ function filterLogs() {
 
 function updateLineCount() {
   const count = $$("#log-output .log-row:not([hidden])").length;
-  $("#visible-lines").textContent = `${count.toLocaleString()} / ${state.logs.length.toLocaleString()} lines`;
+  $("#visible-lines").textContent =
+    `${count.toLocaleString()} / ${state.logs.length.toLocaleString()} lines`;
 }
 
 function renderJumpToLatest() {
   const button = $("#jump-latest");
   button.hidden = state.unseenLogs === 0;
-  button.textContent = state.unseenLogs ? `새 로그 ${state.unseenLogs.toLocaleString()}개 · 최신으로` : "새 로그 · 최신으로";
+  button.textContent = state.unseenLogs
+    ? `새 로그 ${state.unseenLogs.toLocaleString()}개 · 최신으로`
+    : "새 로그 · 최신으로";
 }
 
 function setStreamState(kind, text) {
@@ -365,15 +604,23 @@ function setStreamState(kind, text) {
 
 function renderLiveButton() {
   const button = $("#live-button");
-  const target = state.containers.find((item) => item.id === state.selected);
+  const target = selectedContainer();
   const available = target?.state === "running";
   const active = available && state.liveEnabled;
   button.disabled = !available;
   button.classList.toggle("active", active);
   button.setAttribute("aria-pressed", String(active));
-  button.title = !available ? "중지된 컨테이너는 실시간 로그를 지원하지 않습니다" : active ? "실시간 로그 끄기" : "실시간 로그 켜기";
+  button.title = !available
+    ? "중지된 컨테이너는 실시간 로그를 지원하지 않습니다"
+    : active
+      ? "실시간 로그 끄기"
+      : "실시간 로그 켜기";
   button.querySelector("span").textContent = active ? "●" : "○";
-  button.querySelector("em").textContent = !available ? "실시간 불가" : active ? "실시간 ON" : "실시간 OFF";
+  button.querySelector("em").textContent = !available
+    ? "실시간 불가"
+    : active
+      ? "실시간 ON"
+      : "실시간 OFF";
 }
 
 function clearLogs({ resetCursor = false } = {}) {
@@ -423,25 +670,38 @@ async function streamLogs({ reset = false, resume = false } = {}) {
     setStreamState("", "대상 없음");
     return;
   }
-  const targetID = state.selected;
+  const target = selectedContainer();
+  if (!target) {
+    setStreamState("", "대상 없음");
+    return;
+  }
+  const targetKey = state.selected;
+  const targetID = target.id;
   const controller = new AbortController();
   state.controller = controller;
   setStreamState("", "연결 중");
   const params = new URLSearchParams({
+    agent: target.agent_id,
     container: targetID,
     tail: resume && state.lastTimestamp ? "all" : $("#tail-select").value,
     follow: "false",
   });
-  const running = state.containers.find((item) => item.id === targetID)?.state === "running";
+  const running = target.state === "running";
   state.following = Boolean(running && state.liveEnabled);
   params.set("follow", String(state.following));
   if (resume && state.lastTimestamp) params.set("since", state.lastTimestamp);
-  else if ($("#since-select").value) params.set("since", $("#since-select").value);
+  else if ($("#since-select").value)
+    params.set("since", $("#since-select").value);
   try {
-    const response = await fetch(`/api/logs?${params}`, { signal: controller.signal, headers: { Accept: "application/x-ndjson" } });
+    const response = await fetch(`/api/logs?${params}`, {
+      signal: controller.signal,
+      headers: { Accept: "application/x-ndjson" },
+    });
     if (!response.ok) {
       let message = `${response.status} ${response.statusText}`;
-      try { message = (await response.json()).message || message; } catch (_) {}
+      try {
+        message = (await response.json()).message || message;
+      } catch (_) {}
       const error = new Error(message);
       error.retryable = response.status >= 500;
       throw error;
@@ -455,29 +715,49 @@ async function streamLogs({ reset = false, resume = false } = {}) {
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
-      for (const line of lines) if (line.trim() && token === state.streamToken) appendEvent(JSON.parse(line));
+      for (const line of lines)
+        if (line.trim() && token === state.streamToken)
+          appendEvent(JSON.parse(line));
     }
-    if (buffer.trim() && token === state.streamToken) appendEvent(JSON.parse(buffer));
-    if (!controller.signal.aborted && token === state.streamToken && !state.streamHadError) {
+    if (buffer.trim() && token === state.streamToken)
+      appendEvent(JSON.parse(buffer));
+    if (
+      !controller.signal.aborted &&
+      token === state.streamToken &&
+      !state.streamHadError
+    ) {
       flushPendingLogs();
-      setStreamState("", running && !state.liveEnabled ? "실시간 OFF" : "과거 로그");
+      setStreamState(
+        "",
+        running && !state.liveEnabled ? "실시간 OFF" : "과거 로그",
+      );
     }
   } catch (error) {
     if (error.name === "AbortError" || token !== state.streamToken) return;
     state.assembler.reset();
-    const canRetry = error.retryable !== false && state.liveEnabled && state.currentView === "logs" && state.selected === targetID && state.containers.find((item) => item.id === targetID)?.state === "running";
+    const canRetry =
+      error.retryable !== false &&
+      state.liveEnabled &&
+      state.currentView === "logs" &&
+      state.selected === targetKey &&
+      selectedContainer()?.state === "running";
     if (canRetry) {
       state.reconnectAttempt += 1;
       const delay = Math.min(30000, 2000 * 2 ** (state.reconnectAttempt - 1));
       setStreamState("error", `${Math.round(delay / 1000)}초 후 재연결`);
-      if (state.reconnectAttempt === 1) showToast(`로그 연결이 끊겼습니다: ${error.message}`);
-      state.reconnectTimer = setTimeout(() => streamLogs({ resume: true }), delay);
+      if (state.reconnectAttempt === 1)
+        showToast(`로그 연결이 끊겼습니다: ${error.message}`);
+      state.reconnectTimer = setTimeout(
+        () => streamLogs({ resume: true }),
+        delay,
+      );
     } else {
       setStreamState("error", "연결 오류");
       showToast(`로그 스트림: ${error.message}`);
     }
   } finally {
-    if (token === state.streamToken && state.controller === controller) state.controller = null;
+    if (token === state.streamToken && state.controller === controller)
+      state.controller = null;
   }
 }
 
@@ -486,13 +766,21 @@ function downloadLogs() {
     showToast("저장할 로그가 없습니다.");
     return;
   }
-  const content = state.logs.map((item) => `${item.time} [${item.container}] [${item.stream}] ${item.message}`).join("\n");
+  const content = state.logs
+    .map(
+      (item) =>
+        `${item.time} [${item.container}] [${item.stream}] ${item.message}`,
+    )
+    .join("\n");
   const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  const target = state.containers.find((item) => item.id === state.selected);
-  const safeName = (target?.name || "container").replaceAll(/[^a-zA-Z0-9_.-]/g, "_");
+  const target = selectedContainer();
+  const safeName = (target?.name || "container").replaceAll(
+    /[^a-zA-Z0-9_.-]/g,
+    "_",
+  );
   anchor.download = `${safeName}-logs-${new Date().toISOString().replaceAll(":", "-")}.log`;
   anchor.click();
   URL.revokeObjectURL(url);
@@ -501,8 +789,12 @@ function downloadLogs() {
 function showView(name) {
   const previous = state.currentView;
   state.currentView = name;
-  $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === name));
-  $$(".view").forEach((item) => item.classList.toggle("active", item.id === `${name}-view`));
+  $$(".nav-item").forEach((item) =>
+    item.classList.toggle("active", item.dataset.view === name),
+  );
+  $$(".view").forEach((item) =>
+    item.classList.toggle("active", item.id === `${name}-view`),
+  );
   location.hash = name;
   if (name === "images" && previous === "logs") {
     stopLogStream({ flush: true });
@@ -515,12 +807,12 @@ function showView(name) {
 function bindEvents() {
   $("#container-list").addEventListener("click", (event) => {
     const button = event.target.closest(".container-item");
-    if (!button || !button.dataset.id) return;
-    if (state.selected === button.dataset.id) {
+    if (!button || !button.dataset.key) return;
+    if (state.selected === button.dataset.key) {
       $(".container-panel").classList.remove("open");
       return;
     }
-    state.selected = button.dataset.id;
+    state.selected = button.dataset.key;
     renderContainers();
     $(".container-panel").classList.remove("open");
     restartLogStream();
@@ -532,13 +824,20 @@ function bindEvents() {
     filterLogs.frame = requestAnimationFrame(filterLogs);
   });
   $("#stderr-toggle").addEventListener("change", filterLogs);
-  $("#wrap-toggle").addEventListener("change", (event) => $("#log-output").classList.toggle("wrap", event.target.checked));
+  $("#wrap-toggle").addEventListener("change", (event) =>
+    $("#log-output").classList.toggle("wrap", event.target.checked),
+  );
   $("#tail-select").addEventListener("change", restartLogStream);
   $("#since-select").addEventListener("change", restartLogStream);
   $("#clear-button").addEventListener("click", clearLogs);
   $("#download-button").addEventListener("click", downloadLogs);
   $("#refresh-button").addEventListener("click", () => loadInventory());
   $("#image-refresh-button").addEventListener("click", () => loadInventory());
+  $$(".refresh-interval").forEach((select) =>
+    select.addEventListener("change", (event) =>
+      setRefreshInterval(Number(event.target.value)),
+    ),
+  );
   $("#live-button").addEventListener("click", () => {
     state.liveEnabled = !state.liveEnabled;
     renderLiveButton();
@@ -555,24 +854,38 @@ function bindEvents() {
     state.unseenLogs = 0;
     renderJumpToLatest();
   });
-  $("#log-output").addEventListener("scroll", () => {
-    const output = $("#log-output");
-    if (output.scrollHeight - output.scrollTop - output.clientHeight < 70) {
-      state.unseenLogs = 0;
-      renderJumpToLatest();
-    }
-  }, { passive: true });
+  $("#log-output").addEventListener(
+    "scroll",
+    () => {
+      const output = $("#log-output");
+      if (output.scrollHeight - output.scrollTop - output.clientHeight < 70) {
+        state.unseenLogs = 0;
+        renderJumpToLatest();
+      }
+    },
+    { passive: true },
+  );
   $("#collapse-list").addEventListener("click", () => {
-    if (matchMedia("(max-width: 720px)").matches) $(".container-panel").classList.remove("open");
+    if (matchMedia("(max-width: 720px)").matches)
+      $(".container-panel").classList.remove("open");
     else $(".workspace").classList.toggle("collapsed");
   });
   $("#open-list").addEventListener("click", () => {
-    if (matchMedia("(max-width: 720px)").matches) $(".container-panel").classList.add("open");
+    if (matchMedia("(max-width: 720px)").matches)
+      $(".container-panel").classList.add("open");
     else $(".workspace").classList.remove("collapsed");
   });
-  $$(".nav-item").forEach((item) => item.addEventListener("click", () => showView(item.dataset.view)));
+  $$(".nav-item").forEach((item) =>
+    item.addEventListener("click", () => showView(item.dataset.view)),
+  );
   document.addEventListener("keydown", (event) => {
-    if (event.target.matches("input, select, textarea") || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (
+      event.target.matches("input, select, textarea") ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey
+    )
+      return;
     if (event.key.toLowerCase() === "l") showView("logs");
     if (event.key.toLowerCase() === "i") showView("images");
   });
@@ -583,7 +896,7 @@ async function init() {
   showView(location.hash === "#logs" ? "logs" : "images");
   await loadInventory();
   if (state.currentView === "logs" && !state.streamInitialized) streamLogs();
-  state.inventoryTimer = setInterval(() => loadInventory({ quiet: true }), 5000);
+  setRefreshInterval(storedRefreshSeconds());
 }
 
 init();

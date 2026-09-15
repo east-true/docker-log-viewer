@@ -100,7 +100,13 @@ jobs:
       - name: Start application
         shell: bash
         run: |
-          "$RUNNER_TEMP/docker-log-viewer" -listen 127.0.0.1:18080 >"$RUNNER_TEMP/docker-log-viewer.log" 2>&1 &
+          agent_token="$(openssl rand -hex 32)"
+          echo "DOCKER_LOG_VIEWER_AGENT_TOKEN=$agent_token" >> "$GITHUB_ENV"
+          DOCKER_LOG_VIEWER_AGENT_TOKEN="$agent_token" \
+            "$RUNNER_TEMP/docker-log-viewer" server \
+            -listen 127.0.0.1:18080 \
+            -agent-listen 127.0.0.1:19080 \
+            -agent-insecure >"$RUNNER_TEMP/docker-log-viewer.log" 2>&1 &
           echo "DLV_SERVER_PID=$!" >> "$GITHUB_ENV"
           for attempt in {1..30}; do
             if curl --fail --silent http://127.0.0.1:18080/api/health >/dev/null; then
@@ -110,6 +116,25 @@ jobs:
             sleep 1
           done
           cat "$RUNNER_TEMP/docker-log-viewer.log"
+          exit 1
+
+      - name: Start local Docker Agent
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/docker-log-viewer" agent \
+            -server 127.0.0.1:19080 \
+            -state-dir "$RUNNER_TEMP/agent-state" \
+            -name ci-docker-host \
+            -insecure >"$RUNNER_TEMP/docker-log-viewer-agent.log" 2>&1 &
+          echo "DLV_AGENT_PID=$!" >> "$GITHUB_ENV"
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:18080/api/agents | grep --quiet '"connected":true'; then
+              exit 0
+            fi
+            echo "waiting for Agent ($attempt/30)"
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/docker-log-viewer-agent.log"
           exit 1
 
       - name: Start live-log fixture
@@ -135,6 +160,7 @@ jobs:
             playwright-report/
             test-results/
             ${{ runner.temp }}/docker-log-viewer.log
+            ${{ runner.temp }}/docker-log-viewer-agent.log
           if-no-files-found: ignore
           retention-days: 14
 
@@ -143,6 +169,9 @@ jobs:
         shell: bash
         run: |
           docker rm --force docker-log-viewer-ci-smoke 2>/dev/null || true
+          if [[ -n "${DLV_AGENT_PID:-}" ]]; then
+            kill "$DLV_AGENT_PID" 2>/dev/null || true
+          fi
           if [[ -n "${DLV_SERVER_PID:-}" ]]; then
             kill "$DLV_SERVER_PID" 2>/dev/null || true
           fi
