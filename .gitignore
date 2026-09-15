@@ -7,6 +7,7 @@
 *.dll
 *.so
 *.dylib
+/docker-log-viewer
 
 # Test binary, built with `go test -c`
 *.test
@@ -16,6 +17,11 @@
 coverage.*
 *.coverprofile
 profile.cov
+
+# Browser test dependencies and output
+node_modules/
+test-results/
+playwright-report/
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
@@ -30,3 +36,12 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local AI agent instructions and workspace state
+.agents/
+.agent/
+.codex/
+.claude/
+.cursor/
+AGENTS.md
+CLAUDE.md

@@ -1,0 +1,13 @@
+services:
+  docker-log-viewer:
+    build: .
+    image: docker-log-viewer:local
+    container_name: docker-log-viewer
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro

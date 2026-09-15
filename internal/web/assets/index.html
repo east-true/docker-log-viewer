@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Docker Log Viewer</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#logs" aria-label="Docker Log Viewer home">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span><strong>Docker</strong><small>Log Viewer</small></span>
+        </a>
+        <nav class="main-nav" aria-label="Main navigation">
+          <button class="nav-item active" data-view="images">
+            <span class="nav-icon">◇</span><span>Images</span><kbd>I</kbd>
+          </button>
+          <button class="nav-item" data-view="logs">
+            <span class="nav-icon">⌁</span><span>Logs</span><kbd>L</kbd>
+          </button>
+        </nav>
+        <div class="sidebar-foot">
+          <div id="engine-status" class="engine-status">
+            <span class="status-dot waiting"></span>
+            <span><strong>Docker Engine</strong><small>연결 확인 중</small></span>
+          </div>
+          <p>Read-only local viewer</p>
+        </div>
+      </aside>
+
+      <main>
+        <section id="logs-view" class="view">
+          <header class="topbar">
+            <div>
+              <p class="eyebrow">LOCAL ENGINE</p>
+              <h1>Container logs</h1>
+              <p class="subtitle">이 PC의 모든 컨테이너를 조회하고 선택한 컨테이너의 로그를 확인합니다.</p>
+            </div>
+            <button id="refresh-button" class="button secondary"><span>↻</span> 새로고침</button>
+          </header>
+
+          <div class="workspace">
+            <aside class="container-panel">
+              <div class="panel-heading">
+                <div><h2>Containers</h2><span id="container-count" class="count-badge">0</span></div>
+                <button id="collapse-list" class="icon-button" title="목록 접기" aria-label="목록 접기">‹</button>
+              </div>
+              <label class="search-box">
+                <span>⌕</span><input id="container-search" type="search" placeholder="컨테이너 검색" autocomplete="off" />
+              </label>
+              <div id="container-list" class="container-list" role="listbox" aria-label="Containers"></div>
+            </aside>
+
+            <section class="log-panel">
+              <div class="log-toolbar">
+                <div class="target-title">
+                  <button id="open-list" class="icon-button mobile-only" aria-label="컨테이너 목록 열기">☰</button>
+                  <span id="target-dot" class="status-dot running"></span>
+                  <div><strong id="target-name">컨테이너 선택</strong><small id="target-meta">목록에서 로그 대상을 선택하세요</small></div>
+                </div>
+                <div class="toolbar-controls">
+                  <label>기간<select id="since-select"><option value="">제한 없음</option><option value="5m">5분</option><option value="15m">15분</option><option value="1h">1시간</option><option value="6h">6시간</option><option value="24h">24시간</option><option value="7d">7일</option></select></label>
+                  <label>Tail<select id="tail-select"><option value="100">100</option><option value="200" selected>200</option><option value="500">500</option><option value="1000">1,000</option><option value="5000">5,000</option><option value="all">전체</option></select></label>
+                  <button id="live-button" class="tool-button active" title="실시간 로그 끄기" aria-pressed="true"><span aria-hidden="true">●</span><em>실시간 ON</em></button>
+                  <button id="clear-button" class="tool-button" title="화면 비우기"><span>⌫</span><em>비우기</em></button>
+                  <button id="download-button" class="tool-button" title="로그 다운로드"><span>⇩</span><em>저장</em></button>
+                </div>
+              </div>
+              <div class="log-filterbar">
+                <label class="log-search"><span>⌕</span><input id="log-search" type="search" placeholder="현재 화면 로그 검색" autocomplete="off" /></label>
+                <label class="toggle"><input id="stderr-toggle" type="checkbox" checked /><span></span>stderr</label>
+                <label class="toggle"><input id="wrap-toggle" type="checkbox" /><span></span>줄바꿈</label>
+                <span id="stream-state" class="stream-state"><i></i> 연결 중</span>
+              </div>
+              <div id="log-output" class="log-output" aria-live="polite"></div>
+              <div class="log-footer">
+                <span><span id="visible-lines">0 / 0 lines</span><button id="jump-latest" hidden>새 로그 · 최신으로</button></span>
+                <span>민감 정보가 로그에 포함될 수 있습니다.</span>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="images-view" class="view active">
+          <header class="topbar">
+            <div><p class="eyebrow">LOCAL ENGINE</p><h1>Images</h1><p class="subtitle">로컬 이미지와 연결된 컨테이너의 현재 상태입니다.</p></div>
+            <button id="image-refresh-button" class="button secondary"><span>↻</span> 새로고침</button>
+          </header>
+          <div class="image-summary">
+            <div><small>전체 이미지</small><strong id="images-total">—</strong></div>
+            <div><small>컨테이너가 사용 중</small><strong id="images-used">—</strong></div>
+            <div><small>실행 컨테이너 연결</small><strong id="images-running">—</strong></div>
+          </div>
+          <section class="image-table-card">
+            <div class="image-table-head"><h2>Local images</h2><label class="search-box"><span>⌕</span><input id="image-search" type="search" placeholder="이미지 검색" /></label></div>
+            <div class="table-scroll"><table><thead><tr><th>이미지</th><th>Image ID</th><th>크기</th><th>생성</th><th>컨테이너 상태</th></tr></thead><tbody id="image-table-body"></tbody></table></div>
+          </section>
+        </section>
+      </main>
+    </div>
+    <div id="toast" class="toast" role="status"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

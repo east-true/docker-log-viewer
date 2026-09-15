@@ -1,0 +1,13 @@
+{
+  "name": "docker-log-viewer-ui-tests",
+  "private": true,
+  "scripts": {
+    "docs:screenshot": "node scripts/capture-readme.mjs",
+    "test": "npm run test:unit && npm run test:ui",
+    "test:unit": "node --test tests/ui/log-buffer.test.mjs",
+    "test:ui": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
+}
