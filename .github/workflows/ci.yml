@@ -352,6 +352,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
       - name: Download release assets
         uses: actions/download-artifact@v8
         with:
@@ -367,7 +370,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          release_args=(--verify-tag --generate-notes --fail-on-no-commits)
+          release_args=(--verify-tag --generate-notes)
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
             release_args+=(--prerelease)
           fi
