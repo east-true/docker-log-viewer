@@ -1,6 +1,6 @@
 module github.com/east-true/docker-log-viewer
 
-go 1.25.13
+go 1.26.8
 
 require (
 	github.com/moby/moby/api v1.55.0

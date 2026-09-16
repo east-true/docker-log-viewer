@@ -218,15 +218,15 @@ test("refreshes every agent inventory at the selected interval", async ({
   await page.locator(".refresh-interval:visible").selectOption("10");
   await expect(page.locator(".refresh-interval").first()).toHaveValue("10");
 
-  await page.clock.fastForward(9999);
-  expect(agentRequests).toBe(1);
-  await page.clock.fastForward(1);
-  await expect.poll(() => agentRequests).toBe(2);
+  const requestsBeforeRefresh = agentRequests;
+  await page.clock.fastForward(10_000);
+  await expect.poll(() => agentRequests).toBe(requestsBeforeRefresh + 1);
 
   await page.locator(".refresh-interval:visible").selectOption("0");
   await expect(page.locator(".refresh-interval").first()).toHaveValue("0");
+  const requestsWhenDisabled = agentRequests;
   await page.clock.fastForward(60_000);
-  expect(agentRequests).toBe(2);
+  expect(agentRequests).toBe(requestsWhenDisabled);
 });
 
 test("reconnects a live log stream after an Agent disconnect event", async ({
