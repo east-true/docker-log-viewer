@@ -71,6 +71,11 @@ Browser ────────────────────────
 
 ## 빠른 시작
 
+처음 설치한다면 역할별 가이드를 순서대로 따라 하세요.
+
+- [중앙 Server 설치 및 활성화](docs/setup/server.md)
+- [원격 Agent 설치 및 활성화](docs/setup/agent.md)
+
 ### Docker Compose
 
 Linux, Docker Engine, Docker Compose v2가 필요합니다. 릴리즈에 포함된 Compose 파일과 서명된 multi-platform 이미지를 사용합니다.
