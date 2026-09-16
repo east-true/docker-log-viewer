@@ -1,7 +1,9 @@
+name: docker-log-viewer
+
 services:
   server:
-    build: .
-    image: docker-log-viewer:local
+    image: ${DOCKER_LOG_VIEWER_IMAGE:-ghcr.io/east-true/docker-log-viewer:v0.1.0}
+    pull_policy: missing
     restart: unless-stopped
     init: true
     read_only: true
@@ -50,8 +52,8 @@ services:
       - control
 
   agent:
-    image: docker-log-viewer:local
-    pull_policy: never
+    image: ${DOCKER_LOG_VIEWER_IMAGE:-ghcr.io/east-true/docker-log-viewer:v0.1.0}
+    pull_policy: missing
     restart: unless-stopped
     init: true
     depends_on:

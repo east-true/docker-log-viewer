@@ -1,11 +1,26 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestVersionLine(t *testing.T) {
+	originalVersion, originalCommit := buildVersion, buildCommit
+	t.Cleanup(func() {
+		buildVersion, buildCommit = originalVersion, originalCommit
+	})
+	buildVersion, buildCommit = "v0.1.0", "abc123"
+	if got, want := versionLine(), "docker-log-viewer v0.1.0 (commit abc123)"; got != want {
+		t.Fatalf("versionLine() = %q, want %q", got, want)
+	}
+	if err := run(context.Background(), []string{"--version"}); err != nil {
+		t.Fatalf("run --version: %v", err)
+	}
+}
 
 func TestLoadOptionalToken(t *testing.T) {
 	t.Setenv("DOCKER_LOG_VIEWER_TEST_TOKEN", strings.Repeat("a", 32))

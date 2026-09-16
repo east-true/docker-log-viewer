@@ -23,6 +23,11 @@ import (
 	"google.golang.org/grpc/credentials"
 )
 
+var (
+	buildVersion = "dev"
+	buildCommit  = "unknown"
+)
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -33,7 +38,11 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: docker-log-viewer <server|agent> [options]")
+		return errors.New("usage: docker-log-viewer [--version] <server|agent> [options]")
+	}
+	if len(args) == 1 && args[0] == "--version" {
+		fmt.Fprintln(os.Stdout, versionLine())
+		return nil
 	}
 	switch args[0] {
 	case "server":
@@ -43,6 +52,18 @@ func run(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown mode %q; expected server or agent", args[0])
 	}
+}
+
+func versionLine() string {
+	version := strings.TrimSpace(buildVersion)
+	if version == "" {
+		version = "dev"
+	}
+	commit := strings.TrimSpace(buildCommit)
+	if commit == "" {
+		commit = "unknown"
+	}
+	return fmt.Sprintf("docker-log-viewer %s (commit %s)", version, commit)
 }
 
 func runServer(ctx context.Context, args []string) error {

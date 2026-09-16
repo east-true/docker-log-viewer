@@ -2,7 +2,8 @@ import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
 
-const baseURL = process.env.DLV_TEST_BASE_URL || "http://127.0.0.1:18080";
+const baseURL =
+  process.env.DOCKER_LOG_VIEWER_TEST_BASE_URL || "http://127.0.0.1:18080";
 const output = fileURLToPath(
   new URL("../docs/assets/overview.png", import.meta.url),
 );

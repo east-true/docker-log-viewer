@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/east-true/docker-log-viewer/actions/workflows/ci.yml"><img src="https://github.com/east-true/docker-log-viewer/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white" alt="Go 1.25">
+  <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache 2.0 license"></a>
   <img src="https://img.shields.io/badge/protected%20by-Gitleaks-1679b8" alt="Protected by Gitleaks">
 </p>
@@ -73,15 +73,17 @@ Browser ────────────────────────
 
 ### Docker Compose
 
-Linux, Docker Engine, Docker Compose v2가 필요합니다. Agent 연결용 token과 브라우저 접근용 token을 각각 파일로 만듭니다.
+Linux, Docker Engine, Docker Compose v2가 필요합니다. 릴리즈에 포함된 Compose 파일과 서명된 multi-platform 이미지를 사용합니다.
 
 ```bash
-git clone https://github.com/east-true/docker-log-viewer.git
-cd docker-log-viewer
+mkdir docker-log-viewer && cd docker-log-viewer
+curl --fail --location --remote-name \
+  https://github.com/east-true/docker-log-viewer/releases/download/v0.1.0/compose.yaml
 umask 077
 openssl rand -hex 32 > agent-token
 openssl rand -hex 32 > web-token
-docker compose up --build -d
+docker compose pull
+docker compose up -d
 ```
 
 브라우저에서 <http://127.0.0.1:8080>을 열고 사용자 이름 `admin`, 비밀번호는 `web-token` 파일의 값을 입력하세요. Compose 구성은 Server와 로컬 Agent를 별도 컨테이너로 실행하며, Docker 소켓은 Agent에만 마운트합니다.
@@ -89,7 +91,7 @@ docker compose up --build -d
 신뢰할 수 있는 사설망의 다른 PC에 공개하려면 bind address를 명시합니다.
 
 ```bash
-DOCKER_LOG_VIEWER_BIND_ADDRESS=0.0.0.0 docker compose up --build -d
+DOCKER_LOG_VIEWER_BIND_ADDRESS=0.0.0.0 docker compose up -d
 ```
 
 이 경우에도 HTTP Basic credential과 로그가 평문 HTTP를 지나므로 VPN 또는 TLS reverse proxy를 권장합니다. 인터넷에 직접 공개하지 마세요.
@@ -102,6 +104,28 @@ Agent ID를 유지하는 `agent-state` volume은 기본적으로 보존됩니다
 
 > [!IMPORTANT]
 > Compose 예시는 동일 Docker network 안에서만 Agent transport를 평문으로 사용합니다. 다른 호스트의 Agent를 연결할 때는 반드시 아래 TLS 구성을 사용하세요.
+
+### Linux 바이너리
+
+GitHub Release는 `amd64`와 `arm64`용 정적 바이너리, SHA-256 체크섬, 빌드 provenance를 제공합니다. 다음은 `amd64` 설치 예시입니다. ARM64에서는 파일 이름의 `amd64`를 `arm64`로 바꾸세요.
+
+```bash
+curl --fail --location --remote-name \
+  https://github.com/east-true/docker-log-viewer/releases/download/v0.1.0/docker-log-viewer_0.1.0_linux_amd64.tar.gz
+curl --fail --location --remote-name \
+  https://github.com/east-true/docker-log-viewer/releases/download/v0.1.0/checksums.txt
+sha256sum --ignore-missing --check checksums.txt
+tar -xzf docker-log-viewer_0.1.0_linux_amd64.tar.gz
+sudo install -m 0755 docker-log-viewer_0.1.0_linux_amd64/docker-log-viewer /usr/local/bin/
+docker-log-viewer --version
+```
+
+컨테이너 이미지는 `linux/amd64`와 `linux/arm64`를 지원합니다.
+
+```bash
+docker pull ghcr.io/east-true/docker-log-viewer:v0.1.0
+docker run --rm ghcr.io/east-true/docker-log-viewer:v0.1.0 --version
+```
 
 ### 소스에서 실행
 
@@ -328,14 +352,19 @@ npm test
 npm run docs:screenshot
 ```
 
-GitHub Actions는 Go 포맷·vet·race 테스트·빌드, reverse gRPC 통합 테스트, 컨테이너 이미지 빌드, JavaScript/Chromium UI 테스트, 실제 로그 중지·재개, Gitleaks 전체 이력 검사를 수행합니다.
+GitHub Actions는 Go 포맷·vet·race 테스트·빌드·취약점 검사, reverse gRPC 통합 테스트, 컨테이너 이미지 빌드, JavaScript/Chromium UI 테스트, 실제 로그 중지·재개, npm audit, Gitleaks 전체 이력 검사를 수행합니다.
 
 ## 릴리즈
 
-시맨틱 버전 태그를 푸시하면 모든 CI가 성공한 뒤 GitHub Release와 라벨 기반 릴리즈 노트가 자동 생성됩니다.
+시맨틱 버전 태그를 푸시하면 모든 CI가 성공한 뒤 다음 산출물이 자동으로 게시됩니다.
+
+- Linux `amd64`·`arm64` 바이너리와 Compose 파일
+- SHA-256 체크섬과 GitHub build provenance
+- `linux/amd64`·`linux/arm64` GHCR 이미지, SBOM과 provenance
+- 라벨 기반 GitHub Release 노트
 
 ```bash
-git tag v0.1.0
+git tag --annotate v0.1.0 --message "v0.1.0"
 git push origin v0.1.0
 ```
 

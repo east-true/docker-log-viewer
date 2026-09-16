@@ -2,7 +2,8 @@ import { expect, test } from "@playwright/test";
 
 const containerID = "a".repeat(64);
 const agentID = "11111111-1111-4111-8111-111111111111";
-const baseURL = process.env.DLV_TEST_BASE_URL || "http://127.0.0.1:18080";
+const baseURL =
+  process.env.DOCKER_LOG_VIEWER_TEST_BASE_URL || "http://127.0.0.1:18080";
 const agent = {
   id: agentID,
   name: "lab-host",
@@ -423,10 +424,10 @@ test("keeps grouped container and image lists scrollable", async ({ page }) => {
 test("pauses and resumes a real Docker log stream without clearing it", async ({
   page,
 }) => {
-  const containerName = process.env.DLV_LIVE_TEST_CONTAINER;
+  const containerName = process.env.DOCKER_LOG_VIEWER_LIVE_TEST_CONTAINER;
   test.skip(
     !containerName,
-    "set DLV_LIVE_TEST_CONTAINER to run the live Docker smoke test",
+    "set DOCKER_LOG_VIEWER_LIVE_TEST_CONTAINER to run the live Docker smoke test",
   );
 
   await page.goto(`${baseURL}/#logs`);
