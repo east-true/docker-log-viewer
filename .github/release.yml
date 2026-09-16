@@ -1,0 +1,23 @@
+changelog:
+  exclude:
+    labels:
+      - duplicate
+      - invalid
+      - question
+      - wontfix
+  categories:
+    - title: "✨ 새로운 기능"
+      labels:
+        - enhancement
+    - title: "🐛 버그 수정"
+      labels:
+        - bug
+    - title: "♿ 접근성"
+      labels:
+        - accessibility
+    - title: "📝 문서"
+      labels:
+        - documentation
+    - title: "📦 기타 변경"
+      labels:
+        - "*"

@@ -1,0 +1,16 @@
+.git
+.env
+.local
+agent-token
+web-token
+*.token
+.agents
+.agent
+.codex
+.claude
+.cursor
+AGENTS.md
+CLAUDE.md
+docker-log-viewer
+coverage.*
+*.out
