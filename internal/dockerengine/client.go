@@ -71,6 +71,7 @@ type LogEvent struct {
 	ContainerName string    `json:"container_name,omitempty"`
 	Stream        string    `json:"stream,omitempty"`
 	Message       string    `json:"message,omitempty"`
+	Retryable     bool      `json:"retryable,omitempty"`
 	ObservedAt    time.Time `json:"observed_at"`
 }
 

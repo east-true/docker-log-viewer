@@ -3,6 +3,8 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -23,6 +25,7 @@ type fakeBackend struct {
 	logTargets  []string
 	logAgents   []string
 	logRequests []dockerengine.LogRequest
+	logErr      error
 }
 
 func (f *fakeBackend) Agents(context.Context) ([]transport.Agent, error) {
@@ -43,7 +46,10 @@ func (f *fakeBackend) Logs(_ context.Context, agentID string, request dockerengi
 	f.logTargets = append(f.logTargets, request.ContainerID)
 	f.logRequests = append(f.logRequests, request)
 	f.mu.Unlock()
-	return emit(dockerengine.LogEvent{Type: "log", ContainerID: request.ContainerID, Message: "hello\n", ObservedAt: time.Now()})
+	if err := emit(dockerengine.LogEvent{Type: "log", ContainerID: request.ContainerID, Message: "hello\n", ObservedAt: time.Now()}); err != nil {
+		return err
+	}
+	return f.logErr
 }
 
 func testHandler(t *testing.T, backend Backend) *Handler {
@@ -65,6 +71,43 @@ func TestEmbeddedUIAndSecurityHeaders(t *testing.T) {
 	}
 	if response.Header().Get("Content-Security-Policy") == "" {
 		t.Fatal("missing Content-Security-Policy")
+	}
+	if response.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatal("missing X-Frame-Options")
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("missing no-store cache policy")
+	}
+}
+
+func TestWebAccessTokenProtectsUIAndAPI(t *testing.T) {
+	token := repeatID("a")
+	handler, err := New(&fakeBackend{}, Options{AccessToken: token, SecureTransport: true, MaxLogStreams: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/", nil))
+	if unauthorized.Code != http.StatusUnauthorized || unauthorized.Header().Get("WWW-Authenticate") == "" {
+		t.Fatalf("unauthorized response = %d, headers = %#v", unauthorized.Code, unauthorized.Header())
+	}
+
+	health := httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status = %d", health.Code)
+	}
+
+	authorizedRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	authorizedRequest.SetBasicAuth("docker-log-viewer", token)
+	authorized := httptest.NewRecorder()
+	handler.ServeHTTP(authorized, authorizedRequest)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("authorized status = %d", authorized.Code)
+	}
+	if authorized.Header().Get("Strict-Transport-Security") == "" {
+		t.Fatal("missing HSTS for secure transport")
 	}
 }
 
@@ -130,6 +173,37 @@ func TestLogsAcceptsRFC3339NanoSinceCursor(t *testing.T) {
 	defer backend.mu.Unlock()
 	if len(backend.logRequests) != 1 || backend.logRequests[0].Since != "2026-09-15T01:02:03.123456789Z" || backend.logRequests[0].Tail != "all" || !backend.logRequests[0].Follow {
 		t.Fatalf("log requests = %#v", backend.logRequests)
+	}
+}
+
+func TestLogStreamMarksBackendDisconnectAsRetryable(t *testing.T) {
+	backend := &fakeBackend{
+		containers: []dockerengine.Container{{ID: repeatID("a"), Name: "web"}},
+		logErr:     errors.New("Agent disconnected"),
+	}
+	handler := testHandler(t, backend)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/logs?agent="+testAgentID+"&container="+repeatID("a")+"&follow=true", nil))
+	decoder := json.NewDecoder(response.Body)
+	found := false
+	for {
+		var event dockerengine.LogEvent
+		err := decoder.Decode(&event)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == "error" {
+			found = true
+			if event.Message != "Agent disconnected" || !event.Retryable {
+				t.Fatalf("unexpected error event: %#v", event)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing retryable stream error event")
 	}
 }
 

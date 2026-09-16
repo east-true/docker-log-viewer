@@ -3,6 +3,8 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -31,25 +33,69 @@ type Backend interface {
 }
 
 type Handler struct {
-	backend Backend
-	static  http.Handler
+	backend         Backend
+	static          http.Handler
+	accessTokenHash [sha256.Size]byte
+	requireAuth     bool
+	secureTransport bool
+	logSlots        chan struct{}
 }
 
-func New(backend Backend) (*Handler, error) {
+type Options struct {
+	AccessToken     string
+	SecureTransport bool
+	MaxLogStreams   int
+}
+
+func New(backend Backend, options ...Options) (*Handler, error) {
 	if backend == nil {
 		return nil, errors.New("web backend is required")
+	}
+	config := Options{MaxLogStreams: 32}
+	if len(options) > 1 {
+		return nil, errors.New("only one web options value is allowed")
+	}
+	if len(options) == 1 {
+		config = options[0]
+		if config.MaxLogStreams == 0 {
+			config.MaxLogStreams = 32
+		}
+	}
+	if config.MaxLogStreams < 1 || config.MaxLogStreams > 1024 {
+		return nil, errors.New("max log streams must be between 1 and 1024")
+	}
+	if config.AccessToken != "" && len(config.AccessToken) < 32 {
+		return nil, errors.New("web access token must contain at least 32 characters")
 	}
 	assets, err := fs.Sub(embeddedAssets, "assets")
 	if err != nil {
 		return nil, fmt.Errorf("open embedded assets: %w", err)
 	}
-	return &Handler{backend: backend, static: http.FileServer(http.FS(assets))}, nil
+	return &Handler{
+		backend: backend, static: http.FileServer(http.FS(assets)),
+		accessTokenHash: sha256.Sum256([]byte(config.AccessToken)),
+		requireAuth:     config.AccessToken != "", secureTransport: config.SecureTransport,
+		logSlots: make(chan struct{}, config.MaxLogStreams),
+	}, nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	if h.secureTransport {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+	}
+	if h.requireAuth && r.URL.Path != "/api/health" && !h.authenticated(r) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="Docker Log Viewer", charset="UTF-8"`)
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		h.serveAPI(w, r)
 		return
@@ -65,6 +111,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.static.ServeHTTP(w, r)
+}
+
+func (h *Handler) authenticated(r *http.Request) bool {
+	username, password, ok := r.BasicAuth()
+	if !ok || username != "docker-log-viewer" {
+		return false
+	}
+	provided := sha256.Sum256([]byte(password))
+	return subtle.ConstantTimeCompare(provided[:], h.accessTokenHash[:]) == 1
 }
 
 func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +168,13 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
+	select {
+	case h.logSlots <- struct{}{}:
+		defer func() { <-h.logSlots }()
+	default:
+		writeProblem(w, http.StatusTooManyRequests, "TOO_MANY_LOG_STREAMS", "too many concurrent log streams")
+		return
+	}
 	request, agentID, target, err := decodeLogRequest(r)
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "INVALID_QUERY", err.Error())
@@ -154,7 +216,7 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 	if streamErr := h.backend.Logs(ctx, agentID, request, emit); streamErr != nil && ctx.Err() == nil {
 		_ = emit(dockerengine.LogEvent{
 			Type: "error", ContainerID: selected.ID, ContainerName: selected.Name,
-			Message: streamErr.Error(), ObservedAt: time.Now().UTC(),
+			Message: streamErr.Error(), Retryable: true, ObservedAt: time.Now().UTC(),
 		})
 	}
 	if ctx.Err() == nil {

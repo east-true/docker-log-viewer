@@ -2,6 +2,7 @@
 .env
 .local
 agent-token
+web-token
 *.token
 .agents
 .agent

@@ -229,6 +229,101 @@ test("refreshes every agent inventory at the selected interval", async ({
   expect(agentRequests).toBe(2);
 });
 
+test("reconnects a live log stream after an Agent disconnect event", async ({
+  page,
+}) => {
+  const logRequests = [];
+  await page.clock.install();
+  await page.route("**/api/agents", (route) =>
+    route.fulfill({ json: [agent] }),
+  );
+  await page.route("**/api/containers?*", (route) =>
+    route.fulfill({ json: [container] }),
+  );
+  await page.route("**/api/images?*", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/logs?*", (route) => {
+    logRequests.push(
+      Object.fromEntries(new URL(route.request().url()).searchParams),
+    );
+    let events;
+    if (logRequests.length === 1) {
+      events = [
+        { type: "ready", observed_at: "2026-09-15T01:00:00Z" },
+        {
+          type: "log",
+          container_id: containerID,
+          container_name: "web",
+          stream: "stdout",
+          message: "2026-09-15T01:00:00.123456789Z before disconnect\n",
+          observed_at: "2026-09-15T01:00:00Z",
+        },
+        {
+          type: "error",
+          container_id: containerID,
+          container_name: "web",
+          message: "Agent disconnected",
+          retryable: true,
+          observed_at: "2026-09-15T01:00:01Z",
+        },
+        { type: "end", observed_at: "2026-09-15T01:00:01Z" },
+      ];
+    } else if (logRequests.length === 2) {
+      events = [
+        { type: "ready", observed_at: "2026-09-15T01:00:03Z" },
+        {
+          type: "error",
+          container_id: containerID,
+          container_name: "web",
+          message: "Agent disconnected",
+          retryable: true,
+          observed_at: "2026-09-15T01:00:03Z",
+        },
+        { type: "end", observed_at: "2026-09-15T01:00:03Z" },
+      ];
+    } else {
+      events = [
+        { type: "ready", observed_at: "2026-09-15T01:00:07Z" },
+        {
+          type: "log",
+          container_id: containerID,
+          container_name: "web",
+          stream: "stdout",
+          message: "2026-09-15T01:00:02.123456789Z after reconnect\n",
+          observed_at: "2026-09-15T01:00:07Z",
+        },
+      ];
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: "application/x-ndjson",
+      body: ndjson(events),
+    });
+  });
+
+  await page.goto(`${baseURL}/#logs`);
+  await expect(page.locator("#stream-state")).toContainText("재연결 중");
+  await expect(page.locator(".log-message")).toHaveText(["before disconnect"]);
+
+  await page.clock.fastForward(1000);
+  expect(logRequests).toHaveLength(1);
+  await expect(page.locator("#stream-state")).toContainText("재연결 중");
+  await page.clock.fastForward(1000);
+  await expect.poll(() => logRequests.length).toBe(2);
+  await expect(page.locator("#stream-state")).toContainText("재연결 중");
+  await page.clock.fastForward(1000);
+  expect(logRequests).toHaveLength(2);
+  await page.clock.fastForward(3000);
+  await expect.poll(() => logRequests.length).toBe(3);
+  await expect(page.locator(".log-message").last()).toHaveText(
+    "after reconnect",
+  );
+  expect(logRequests[2]).toMatchObject({
+    follow: "true",
+    since: "2026-09-15T01:00:00.123456789Z",
+    tail: "all",
+  });
+});
+
 test("keeps grouped container and image lists scrollable", async ({ page }) => {
   const agents = [
     agent,

@@ -53,6 +53,10 @@ func runServer(ctx context.Context, args []string) error {
 	certificateFile := flags.String("tls-cert", "", "TLS certificate for Agent transport")
 	privateKeyFile := flags.String("tls-key", "", "TLS private key for Agent transport")
 	insecureAgent := flags.Bool("agent-insecure", false, "allow plaintext Agent transport")
+	webTokenFile := flags.String("web-token-file", "", "file containing the browser access token")
+	webCertificateFile := flags.String("web-tls-cert", "", "TLS certificate for the browser UI")
+	webPrivateKeyFile := flags.String("web-tls-key", "", "TLS private key for the browser UI")
+	maxLogStreams := flags.Int("max-log-streams", 32, "maximum concurrent browser log streams")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -64,15 +68,30 @@ func runServer(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	handler, err := web.New(registry)
+	webToken, err := loadOptionalToken(*webTokenFile, "DOCKER_LOG_VIEWER_WEB_TOKEN", "web access")
+	if err != nil {
+		return err
+	}
+	browserTLS, err := browserTLSConfig(*webCertificateFile, *webPrivateKeyFile)
+	if err != nil {
+		return err
+	}
+	handler, err := web.New(registry, web.Options{
+		AccessToken: webToken, SecureTransport: browserTLS != nil, MaxLogStreams: *maxLogStreams,
+	})
 	if err != nil {
 		return fmt.Errorf("create web handler: %w", err)
 	}
-	listener, err := net.Listen("tcp", *agentListen)
+	agentListener, err := net.Listen("tcp", *agentListen)
 	if err != nil {
 		return fmt.Errorf("listen for Agents: %w", err)
 	}
-	defer listener.Close()
+	defer agentListener.Close()
+	webListener, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return fmt.Errorf("listen for browser UI: %w", err)
+	}
+	defer webListener.Close()
 	grpcOptions, err := serverTransportOptions(*certificateFile, *privateKeyFile, *insecureAgent)
 	if err != nil {
 		return err
@@ -82,16 +101,32 @@ func runServer(ctx context.Context, args []string) error {
 	defer cancel()
 	errorsChannel := make(chan error, 2)
 	go func() {
-		err := transport.Serve(runCtx, listener, registry, grpcOptions...)
+		err := transport.Serve(runCtx, agentListener, registry, grpcOptions...)
 		if err != nil && runCtx.Err() == nil {
 			errorsChannel <- fmt.Errorf("serve Agent transport: %w", err)
 		}
 	}()
-	httpServer := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+	httpServer := &http.Server{
+		Addr: *listen, Handler: handler, TLSConfig: browserTLS,
+		ReadTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,
+	}
 	go func() {
-		log.Printf("Docker Log Viewer Server UI listening on http://%s", *listen)
+		scheme := "http"
+		listener := webListener
+		if browserTLS != nil {
+			scheme = "https"
+			listener = tls.NewListener(webListener, browserTLS)
+		}
+		if webToken == "" && !isLoopbackAddress(*listen) {
+			log.Printf("WARNING: browser UI is exposed on %s without authentication", *listen)
+		}
+		if webToken != "" && browserTLS == nil && !isLoopbackAddress(*listen) {
+			log.Printf("WARNING: browser access credentials and logs are crossing the network without TLS")
+		}
+		log.Printf("Docker Log Viewer Server UI listening on %s://%s", scheme, *listen)
 		log.Printf("Docker Log Viewer Server accepting Agents on %s", *agentListen)
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errorsChannel <- fmt.Errorf("serve HTTP: %w", err)
 		}
 	}()
@@ -105,6 +140,20 @@ func runServer(ctx context.Context, args []string) error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	return httpServer.Shutdown(shutdownCtx)
+}
+
+func browserTLSConfig(certificateFile, privateKeyFile string) (*tls.Config, error) {
+	if certificateFile == "" && privateKeyFile == "" {
+		return nil, nil
+	}
+	if certificateFile == "" || privateKeyFile == "" {
+		return nil, errors.New("browser TLS requires both -web-tls-cert and -web-tls-key")
+	}
+	certificate, err := tls.LoadX509KeyPair(certificateFile, privateKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load browser TLS certificate: %w", err)
+	}
+	return &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13}, nil
 }
 
 func runAgent(ctx context.Context, args []string) error {
@@ -198,6 +247,35 @@ func loadToken(path string) (string, error) {
 		return "", errors.New("Agent token must contain at least 32 characters")
 	}
 	return value, nil
+}
+
+func loadOptionalToken(path, environment, label string) (string, error) {
+	var value string
+	if path == "" {
+		value = strings.TrimSpace(os.Getenv(environment))
+	} else {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read %s token: %w", label, err)
+		}
+		value = strings.TrimSpace(string(data))
+	}
+	if value != "" && len(value) < 32 {
+		return "", fmt.Errorf("%s token must contain at least 32 characters", label)
+	}
+	return value, nil
+}
+
+func isLoopbackAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func envOr(key, fallback string) string {

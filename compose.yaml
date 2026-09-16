@@ -2,46 +2,96 @@ services:
   server:
     build: .
     image: docker-log-viewer:local
-    container_name: docker-log-viewer-server
     restart: unless-stopped
+    init: true
     read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_READ_SEARCH
+    pids_limit: 100
     security_opt:
       - no-new-privileges:true
-    environment:
-      DOCKER_LOG_VIEWER_AGENT_TOKEN: ${DOCKER_LOG_VIEWER_AGENT_TOKEN:?set a random token with at least 32 characters}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    secrets:
+      - agent-token
+      - web-token
     command:
       - server
       - -listen
       - 0.0.0.0:8080
       - -agent-listen
       - 0.0.0.0:9080
+      - -agent-token-file
+      - /run/secrets/agent-token
+      - -web-token-file
+      - /run/secrets/web-token
       - -agent-insecure
     ports:
-      - "127.0.0.1:${DOCKER_LOG_VIEWER_PORT:-8080}:8080"
+      - "${DOCKER_LOG_VIEWER_BIND_ADDRESS:-127.0.0.1}:${DOCKER_LOG_VIEWER_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--spider",
+          "http://127.0.0.1:8080/api/health",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - web
+      - control
 
   agent:
     image: docker-log-viewer:local
     pull_policy: never
-    container_name: docker-log-viewer-agent
     restart: unless-stopped
+    init: true
     depends_on:
-      - server
+      server:
+        condition: service_healthy
     read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_READ_SEARCH
+    pids_limit: 100
     security_opt:
       - no-new-privileges:true
     environment:
-      DOCKER_LOG_VIEWER_AGENT_TOKEN: ${DOCKER_LOG_VIEWER_AGENT_TOKEN:?set a random token with at least 32 characters}
       DOCKER_LOG_VIEWER_AGENT_NAME: ${DOCKER_LOG_VIEWER_AGENT_NAME:-local-docker}
+    secrets:
+      - agent-token
     command:
       - agent
       - -server
       - server:9080
       - -state-dir
       - /var/lib/docker-log-viewer
+      - -agent-token-file
+      - /run/secrets/agent-token
       - -insecure
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - agent-state:/var/lib/docker-log-viewer
+    networks:
+      - control
 
 volumes:
   agent-state:
+
+secrets:
+  agent-token:
+    file: ${DOCKER_LOG_VIEWER_AGENT_TOKEN_FILE:-./agent-token}
+  web-token:
+    file: ${DOCKER_LOG_VIEWER_WEB_TOKEN_FILE:-./web-token}
+
+networks:
+  web:
+  control:
+    internal: true

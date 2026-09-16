@@ -73,16 +73,26 @@ Browser ────────────────────────
 
 ### Docker Compose
 
-Linux, Docker Engine, Docker Compose v2가 필요합니다. 먼저 Server와 Agent가 공유할 임의 토큰을 현재 셸에 설정합니다.
+Linux, Docker Engine, Docker Compose v2가 필요합니다. Agent 연결용 token과 브라우저 접근용 token을 각각 파일로 만듭니다.
 
 ```bash
 git clone https://github.com/east-true/docker-log-viewer.git
 cd docker-log-viewer
-export DOCKER_LOG_VIEWER_AGENT_TOKEN="$(openssl rand -hex 32)"
+umask 077
+openssl rand -hex 32 > agent-token
+openssl rand -hex 32 > web-token
 docker compose up --build -d
 ```
 
-브라우저에서 <http://127.0.0.1:8080>을 여세요. Compose 구성은 Server와 로컬 Agent를 별도 컨테이너로 실행하며, Docker 소켓은 Agent에만 마운트합니다.
+브라우저에서 <http://127.0.0.1:8080>을 열고 사용자 이름 `docker-log-viewer`, 비밀번호는 `web-token` 파일의 값을 입력하세요. Compose 구성은 Server와 로컬 Agent를 별도 컨테이너로 실행하며, Docker 소켓은 Agent에만 마운트합니다.
+
+신뢰할 수 있는 사설망의 다른 PC에 공개하려면 bind address를 명시합니다.
+
+```bash
+DOCKER_LOG_VIEWER_BIND_ADDRESS=0.0.0.0 docker compose up --build -d
+```
+
+이 경우에도 HTTP Basic credential과 로그가 평문 HTTP를 지나므로 VPN 또는 TLS reverse proxy를 권장합니다. 인터넷에 직접 공개하지 마세요.
 
 ```bash
 docker compose down
@@ -101,6 +111,7 @@ Agent ID를 유지하는 `agent-state` volume은 기본적으로 보존됩니다
 go build -o docker-log-viewer ./cmd/docker-log-viewer
 umask 077
 openssl rand -hex 32 > agent-token
+openssl rand -hex 32 > web-token
 ```
 
 ```bash
@@ -108,6 +119,7 @@ openssl rand -hex 32 > agent-token
   -listen 127.0.0.1:8080 \
   -agent-listen 127.0.0.1:9080 \
   -agent-token-file ./agent-token \
+  -web-token-file ./web-token \
   -agent-insecure
 ```
 
@@ -122,6 +134,23 @@ mkdir -p "$PWD/.local/agent-state"
 ```
 
 `-agent-insecure`와 `-insecure`는 같은 PC 또는 격리된 개발 network에서만 사용하세요.
+
+### 브라우저 UI TLS
+
+UI를 network에 직접 노출할 때는 브라우저 인증 token과 TLS 1.3 인증서를 함께 설정합니다.
+
+```bash
+./docker-log-viewer server \
+  -listen 0.0.0.0:8080 \
+  -web-token-file ./web-token \
+  -web-tls-cert ./server.crt \
+  -web-tls-key ./server.key \
+  -agent-listen 127.0.0.1:9080 \
+  -agent-token-file ./agent-token \
+  -agent-insecure
+```
+
+브라우저 인증 사용자 이름은 `docker-log-viewer`로 고정되며 token이 비밀번호입니다. `/api/health`만 인증 없이 상태 확인에 사용할 수 있습니다.
 
 ### 원격 Agent와 TLS
 
@@ -171,6 +200,7 @@ Agent에는 수신 포트를 열 필요가 없습니다.
 - stderr 숨김, 긴 줄 줄바꿈, 화면 비우기 및 파일 저장
 - 실시간 ON/OFF 전환 시 기존 로그와 스크롤 문맥 유지
 - 연결 복구 시 마지막 Docker 타임스탬프부터 재개하고 경계 로그 중복 제거
+- 연결 끊김은 로그 행에 섞지 않고 상태 영역에 `재연결 중`으로 표시하며 브라우저는 지수 backoff로 로그를 재요청
 - 위로 스크롤한 동안 들어온 새 로그 개수와 최신 위치 이동 버튼 표시
 
 ### Images
@@ -212,13 +242,16 @@ Docker Log Viewer가 잘 맞는 경우:
 
 ### Server
 
-| 설정                    | 기본값           | 설명                              |
-| ----------------------- | ---------------- | --------------------------------- |
-| `-listen`               | `127.0.0.1:8080` | 브라우저 HTTP 수신 주소           |
-| `-agent-listen`         | `127.0.0.1:9080` | Agent gRPC 수신 주소              |
-| `-agent-token-file`     | 없음             | 32자 이상의 공유 Agent token 파일 |
-| `-tls-cert`, `-tls-key` | 없음             | Agent transport TLS 인증서와 키   |
-| `-agent-insecure`       | `false`          | Agent transport 평문 허용         |
+| 설정                            | 기본값           | 설명                                  |
+| ------------------------------- | ---------------- | ------------------------------------- |
+| `-listen`                       | `127.0.0.1:8080` | 브라우저 HTTP(S) 수신 주소            |
+| `-web-token-file`               | 없음             | 32자 이상의 브라우저 Basic auth token |
+| `-web-tls-cert`, `-web-tls-key` | 없음             | 브라우저 UI TLS 1.3 인증서와 키       |
+| `-max-log-streams`              | `32`             | 동시 브라우저 로그 스트림 상한        |
+| `-agent-listen`                 | `127.0.0.1:9080` | Agent gRPC 수신 주소                  |
+| `-agent-token-file`             | 없음             | 32자 이상의 공유 Agent token 파일     |
+| `-tls-cert`, `-tls-key`         | 없음             | Agent transport TLS 1.3 인증서와 키   |
+| `-agent-insecure`               | `false`          | Agent transport 평문 허용             |
 
 ### Agent
 
@@ -232,18 +265,21 @@ Docker Log Viewer가 잘 맞는 경우:
 | `-tls-server-name`  | 없음                         | 검증할 Server 인증서 이름    |
 | `-insecure`         | `false`                      | Server 연결 평문 허용        |
 
-두 모드 모두 token 파일 대신 `DOCKER_LOG_VIEWER_AGENT_TOKEN` 환경 변수를 사용할 수 있습니다. 파일 기반 secret을 권장합니다.
+두 모드 모두 Agent token 파일 대신 `DOCKER_LOG_VIEWER_AGENT_TOKEN` 환경 변수를 사용할 수 있습니다. Server의 브라우저 token은 `DOCKER_LOG_VIEWER_WEB_TOKEN`도 지원합니다. 파일 기반 secret을 권장합니다.
 
 ## 보안
 
 > [!WARNING]
-> Docker Log Viewer에는 브라우저 인증, 사용자 계정 또는 RBAC가 없습니다. Server UI는 기본값처럼 loopback에 바인딩하거나 인증 프록시 뒤에서만 제공하세요.
+> 브라우저 인증은 하나의 공유 Basic auth token이며 사용자별 계정이나 RBAC는 아닙니다. network에 공개할 때는 TLS와 함께 사용하고, 인터넷에 직접 노출하지 마세요.
 
 - 컨테이너 로그에는 토큰, 비밀번호, 개인정보가 포함될 수 있습니다.
 - Docker 소켓은 Agent에만 연결되지만, 읽기 전용 파일 마운트가 Docker Engine API의 강한 권한을 줄이지는 않습니다.
 - Server와 Agent는 32자 이상의 공유 token으로 세션을 인증합니다. 현재 Agent별 token과 폐기 기능은 없습니다.
+- Compose는 Agent token과 브라우저 token을 environment가 아닌 secret 파일로 전달합니다.
 - 원격 연결은 TLS를 사용하세요. 평문 옵션은 명시적으로 설정해야 하며 개발 환경 전용입니다.
 - Server API는 GET 요청만 제공하고 Agent는 Docker 조회 API만 호출합니다.
+- 응답은 저장 금지, CSP, frame 차단, MIME sniffing 차단, permissions 제한 header를 포함합니다.
+- Server는 동시 로그 스트림 수와 HTTP header 크기를 제한하며, Compose는 secret 읽기에 필요한 `DAC_READ_SEARCH` 외 capability 제거, read-only root filesystem, PID 제한을 적용합니다.
 - 브라우저에서 저장한 로그 파일은 사용자가 직접 보호하고 삭제해야 합니다.
 
 ## HTTP API

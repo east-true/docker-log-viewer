@@ -34,6 +34,7 @@ go.work.sum
 .env
 .local/
 agent-token
+web-token
 *.token
 
 # Editor/IDE

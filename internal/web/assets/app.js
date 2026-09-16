@@ -24,6 +24,7 @@ const state = {
   currentView: null,
   streamToken: 0,
   streamHadError: false,
+  streamError: null,
   reconnectAttempt: 0,
   lastTimestamp: "",
   boundaryCounts: new Map(),
@@ -445,15 +446,12 @@ function appendEvent(event) {
   if (event.type === "error") {
     flushPendingLogs();
     state.streamHadError = true;
+    state.streamError = {
+      message: event.message || "로그 스트림이 종료되었습니다.",
+      retryable: event.retryable === true,
+    };
     state.following = false;
-    appendLine({
-      time: event.observed_at,
-      container: event.container_name || "system",
-      stream: "error",
-      message: event.message,
-      system: true,
-    });
-    setStreamState("error", "로그를 읽을 수 없음");
+    setStreamState("error", "연결 끊김");
     return;
   }
   if (event.type === "end") {
@@ -602,6 +600,11 @@ function setStreamState(kind, text) {
   value.lastChild.textContent = ` ${text}`;
 }
 
+function clearReconnectTimer() {
+  clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = null;
+}
+
 function renderLiveButton() {
   const button = $("#live-button");
   const target = selectedContainer();
@@ -643,8 +646,7 @@ function restartLogStream() {
 }
 
 function stopLogStream({ flush = false } = {}) {
-  clearTimeout(state.reconnectTimer);
-  state.reconnectTimer = null;
+  clearReconnectTimer();
   if (flush) flushPendingLogs();
   else state.assembler.reset();
   if (state.controller) state.controller.abort();
@@ -655,12 +657,13 @@ function stopLogStream({ flush = false } = {}) {
 
 async function streamLogs({ reset = false, resume = false } = {}) {
   state.streamInitialized = true;
-  clearTimeout(state.reconnectTimer);
+  clearReconnectTimer();
   if (state.controller) state.controller.abort();
   const token = ++state.streamToken;
   state.controller = null;
   state.assembler.reset();
   state.streamHadError = false;
+  state.streamError = null;
   if (reset) {
     clearLogs({ resetCursor: true });
     state.reconnectAttempt = 0;
@@ -721,6 +724,11 @@ async function streamLogs({ reset = false, resume = false } = {}) {
     }
     if (buffer.trim() && token === state.streamToken)
       appendEvent(JSON.parse(buffer));
+    if (state.streamError) {
+      const error = new Error(state.streamError.message);
+      error.retryable = state.streamError.retryable;
+      throw error;
+    }
     if (
       !controller.signal.aborted &&
       token === state.streamToken &&
@@ -744,9 +752,7 @@ async function streamLogs({ reset = false, resume = false } = {}) {
     if (canRetry) {
       state.reconnectAttempt += 1;
       const delay = Math.min(30000, 2000 * 2 ** (state.reconnectAttempt - 1));
-      setStreamState("error", `${Math.round(delay / 1000)}초 후 재연결`);
-      if (state.reconnectAttempt === 1)
-        showToast(`로그 연결이 끊겼습니다: ${error.message}`);
+      setStreamState("error", "재연결 중");
       state.reconnectTimer = setTimeout(
         () => streamLogs({ resume: true }),
         delay,
