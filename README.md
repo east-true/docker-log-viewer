@@ -84,7 +84,7 @@ openssl rand -hex 32 > web-token
 docker compose up --build -d
 ```
 
-브라우저에서 <http://127.0.0.1:8080>을 열고 사용자 이름 `docker-log-viewer`, 비밀번호는 `web-token` 파일의 값을 입력하세요. Compose 구성은 Server와 로컬 Agent를 별도 컨테이너로 실행하며, Docker 소켓은 Agent에만 마운트합니다.
+브라우저에서 <http://127.0.0.1:8080>을 열고 사용자 이름 `admin`, 비밀번호는 `web-token` 파일의 값을 입력하세요. Compose 구성은 Server와 로컬 Agent를 별도 컨테이너로 실행하며, Docker 소켓은 Agent에만 마운트합니다.
 
 신뢰할 수 있는 사설망의 다른 PC에 공개하려면 bind address를 명시합니다.
 
@@ -150,7 +150,7 @@ UI를 network에 직접 노출할 때는 브라우저 인증 token과 TLS 1.3 �
   -agent-insecure
 ```
 
-브라우저 인증 사용자 이름은 `docker-log-viewer`로 고정되며 token이 비밀번호입니다. `/api/health`만 인증 없이 상태 확인에 사용할 수 있습니다.
+브라우저 인증 사용자 이름의 기본값은 `admin`이며 `-web-user` 또는 `DOCKER_LOG_VIEWER_WEB_USER`로 변경할 수 있습니다. 비밀번호는 token 값을 가공하지 않고 그대로 사용합니다. 예를 들어 `web-token` 파일을 사용했다면 `cat web-token`으로 확인할 수 있습니다. `/api/health`만 인증 없이 상태 확인에 사용할 수 있습니다.
 
 ### 원격 Agent와 TLS
 
@@ -245,6 +245,7 @@ Docker Log Viewer가 잘 맞는 경우:
 | 설정                            | 기본값           | 설명                                  |
 | ------------------------------- | ---------------- | ------------------------------------- |
 | `-listen`                       | `127.0.0.1:8080` | 브라우저 HTTP(S) 수신 주소            |
+| `-web-user`                     | `admin`          | 브라우저 Basic auth 사용자 이름       |
 | `-web-token-file`               | 없음             | 32자 이상의 브라우저 Basic auth token |
 | `-web-tls-cert`, `-web-tls-key` | 없음             | 브라우저 UI TLS 1.3 인증서와 키       |
 | `-max-log-streams`              | `32`             | 동시 브라우저 로그 스트림 상한        |
@@ -265,7 +266,7 @@ Docker Log Viewer가 잘 맞는 경우:
 | `-tls-server-name`  | 없음                         | 검증할 Server 인증서 이름    |
 | `-insecure`         | `false`                      | Server 연결 평문 허용        |
 
-두 모드 모두 Agent token 파일 대신 `DOCKER_LOG_VIEWER_AGENT_TOKEN` 환경 변수를 사용할 수 있습니다. Server의 브라우저 token은 `DOCKER_LOG_VIEWER_WEB_TOKEN`도 지원합니다. 파일 기반 secret을 권장합니다.
+두 모드 모두 Agent token 파일 대신 `DOCKER_LOG_VIEWER_AGENT_TOKEN` 환경 변수를 사용할 수 있습니다. Server의 브라우저 사용자 이름과 token은 `DOCKER_LOG_VIEWER_WEB_USER`, `DOCKER_LOG_VIEWER_WEB_TOKEN`도 지원합니다. 파일 기반 secret을 권장합니다.
 
 ## 보안
 

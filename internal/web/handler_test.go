@@ -82,7 +82,7 @@ func TestEmbeddedUIAndSecurityHeaders(t *testing.T) {
 
 func TestWebAccessTokenProtectsUIAndAPI(t *testing.T) {
 	token := repeatID("a")
-	handler, err := New(&fakeBackend{}, Options{AccessToken: token, SecureTransport: true, MaxLogStreams: 1})
+	handler, err := New(&fakeBackend{}, Options{Username: "viewer", AccessToken: token, SecureTransport: true, MaxLogStreams: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,6 +93,14 @@ func TestWebAccessTokenProtectsUIAndAPI(t *testing.T) {
 		t.Fatalf("unauthorized response = %d, headers = %#v", unauthorized.Code, unauthorized.Header())
 	}
 
+	wrongUserRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	wrongUserRequest.SetBasicAuth("admin", token)
+	wrongUser := httptest.NewRecorder()
+	handler.ServeHTTP(wrongUser, wrongUserRequest)
+	if wrongUser.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong user status = %d", wrongUser.Code)
+	}
+
 	health := httptest.NewRecorder()
 	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/api/health", nil))
 	if health.Code != http.StatusOK {
@@ -100,7 +108,7 @@ func TestWebAccessTokenProtectsUIAndAPI(t *testing.T) {
 	}
 
 	authorizedRequest := httptest.NewRequest(http.MethodGet, "/", nil)
-	authorizedRequest.SetBasicAuth("docker-log-viewer", token)
+	authorizedRequest.SetBasicAuth("viewer", token)
 	authorized := httptest.NewRecorder()
 	handler.ServeHTTP(authorized, authorizedRequest)
 	if authorized.Code != http.StatusOK {
@@ -108,6 +116,16 @@ func TestWebAccessTokenProtectsUIAndAPI(t *testing.T) {
 	}
 	if authorized.Header().Get("Strict-Transport-Security") == "" {
 		t.Fatal("missing HSTS for secure transport")
+	}
+}
+
+func TestWebAccessRejectsInvalidUsername(t *testing.T) {
+	for _, username := range []string{"bad:user", "has space", "-leading", repeatID("a") + "a"} {
+		t.Run(username, func(t *testing.T) {
+			if _, err := New(&fakeBackend{}, Options{Username: username, AccessToken: repeatID("a")}); err == nil {
+				t.Fatal("expected invalid username error")
+			}
+		})
 	}
 }
 

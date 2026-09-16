@@ -23,7 +23,10 @@ import (
 //go:embed assets/*
 var embeddedAssets embed.FS
 
-var containerIDPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var (
+	containerIDPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	webUsernamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+)
 
 type Backend interface {
 	Agents(context.Context) ([]transport.Agent, error)
@@ -36,12 +39,14 @@ type Handler struct {
 	backend         Backend
 	static          http.Handler
 	accessTokenHash [sha256.Size]byte
+	username        string
 	requireAuth     bool
 	secureTransport bool
 	logSlots        chan struct{}
 }
 
 type Options struct {
+	Username        string
 	AccessToken     string
 	SecureTransport bool
 	MaxLogStreams   int
@@ -51,12 +56,15 @@ func New(backend Backend, options ...Options) (*Handler, error) {
 	if backend == nil {
 		return nil, errors.New("web backend is required")
 	}
-	config := Options{MaxLogStreams: 32}
+	config := Options{Username: "admin", MaxLogStreams: 32}
 	if len(options) > 1 {
 		return nil, errors.New("only one web options value is allowed")
 	}
 	if len(options) == 1 {
 		config = options[0]
+		if config.Username == "" {
+			config.Username = "admin"
+		}
 		if config.MaxLogStreams == 0 {
 			config.MaxLogStreams = 32
 		}
@@ -67,6 +75,9 @@ func New(backend Backend, options ...Options) (*Handler, error) {
 	if config.AccessToken != "" && len(config.AccessToken) < 32 {
 		return nil, errors.New("web access token must contain at least 32 characters")
 	}
+	if !webUsernamePattern.MatchString(config.Username) {
+		return nil, errors.New("web username must contain 1 to 64 letters, digits, dots, underscores, or hyphens")
+	}
 	assets, err := fs.Sub(embeddedAssets, "assets")
 	if err != nil {
 		return nil, fmt.Errorf("open embedded assets: %w", err)
@@ -74,6 +85,7 @@ func New(backend Backend, options ...Options) (*Handler, error) {
 	return &Handler{
 		backend: backend, static: http.FileServer(http.FS(assets)),
 		accessTokenHash: sha256.Sum256([]byte(config.AccessToken)),
+		username:        config.Username,
 		requireAuth:     config.AccessToken != "", secureTransport: config.SecureTransport,
 		logSlots: make(chan struct{}, config.MaxLogStreams),
 	}, nil
@@ -115,7 +127,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) authenticated(r *http.Request) bool {
 	username, password, ok := r.BasicAuth()
-	if !ok || username != "docker-log-viewer" {
+	if !ok || username != h.username {
 		return false
 	}
 	provided := sha256.Sum256([]byte(password))

@@ -17,6 +17,8 @@ services:
     secrets:
       - agent-token
       - web-token
+    environment:
+      DOCKER_LOG_VIEWER_WEB_USER: ${DOCKER_LOG_VIEWER_WEB_USER:-admin}
     command:
       - server
       - -listen

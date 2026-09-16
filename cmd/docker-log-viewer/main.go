@@ -54,6 +54,7 @@ func runServer(ctx context.Context, args []string) error {
 	privateKeyFile := flags.String("tls-key", "", "TLS private key for Agent transport")
 	insecureAgent := flags.Bool("agent-insecure", false, "allow plaintext Agent transport")
 	webTokenFile := flags.String("web-token-file", "", "file containing the browser access token")
+	webUsername := flags.String("web-user", envOr("DOCKER_LOG_VIEWER_WEB_USER", "admin"), "browser Basic auth username")
 	webCertificateFile := flags.String("web-tls-cert", "", "TLS certificate for the browser UI")
 	webPrivateKeyFile := flags.String("web-tls-key", "", "TLS private key for the browser UI")
 	maxLogStreams := flags.Int("max-log-streams", 32, "maximum concurrent browser log streams")
@@ -77,7 +78,8 @@ func runServer(ctx context.Context, args []string) error {
 		return err
 	}
 	handler, err := web.New(registry, web.Options{
-		AccessToken: webToken, SecureTransport: browserTLS != nil, MaxLogStreams: *maxLogStreams,
+		Username: *webUsername, AccessToken: webToken,
+		SecureTransport: browserTLS != nil, MaxLogStreams: *maxLogStreams,
 	})
 	if err != nil {
 		return fmt.Errorf("create web handler: %w", err)
