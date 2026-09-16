@@ -40,10 +40,21 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Read Go version
+        id: go-version
+        shell: bash
+        run: |
+          version="$(awk '$1 == "go" { print $2; exit }' go.mod)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid Go version in go.mod: $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Set up Go and check known vulnerabilities
         uses: golang/govulncheck-action@v1.1.0
         with:
-          go-version-file: go.mod
+          go-version-input: ${{ steps.go-version.outputs.version }}
           go-package: ./...
           repo-checkout: false
           cache-dependency-path: go.sum
